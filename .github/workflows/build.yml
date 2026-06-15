@@ -51,8 +51,30 @@ jobs:
           name: windows
           path: dist/Gunnas-Strat-windows.exe
 
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Build Linux binary
+        run: |
+          pyinstaller --onefile --name "gunnas-strat" \
+            --hidden-import websocket \
+            --collect-submodules tzdata \
+            main.py
+      - name: Rename
+        run: mv "dist/gunnas-strat" "Gunnas-Strat-linux"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: Gunnas-Strat-linux
+
   release:
-    needs: [build-mac, build-windows]
+    needs: [build-mac, build-windows, build-linux]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
@@ -65,3 +87,4 @@ jobs:
           files: |
             artifacts/mac/Gunnas-Strat-mac.zip
             artifacts/windows/Gunnas-Strat-windows.exe
+            artifacts/linux/Gunnas-Strat-linux
