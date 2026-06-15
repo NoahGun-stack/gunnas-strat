@@ -1,0 +1,18 @@
+# Build output
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+
+# Local data / backups (never ship these)
+users.json
+*.bak
+*.tmp
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,67 @@
+name: Build & Release
+
+# Runs when you push a version tag like v1.0.0
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:   # also lets you run it manually from the Actions tab
+
+permissions:
+  contents: write       # needed to publish a Release
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Build .app
+        run: |
+          pyinstaller --onefile --windowed --name "Gunnas Strat" \
+            --hidden-import websocket \
+            --collect-submodules tzdata \
+            main.py
+      - name: Zip the app
+        run: ditto -c -k --keepParent "dist/Gunnas Strat.app" "Gunnas-Strat-mac.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: Gunnas-Strat-mac.zip
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Build .exe
+        run: pyinstaller --onefile --windowed --name "Gunnas Strat" --hidden-import websocket --collect-submodules tzdata main.py
+      - name: Rename
+        run: ren "dist\Gunnas Strat.exe" "Gunnas-Strat-windows.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/Gunnas-Strat-windows.exe
+
+  release:
+    needs: [build-mac, build-windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/mac/Gunnas-Strat-mac.zip
+            artifacts/windows/Gunnas-Strat-windows.exe
