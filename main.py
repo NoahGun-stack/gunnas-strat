@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
 import zoneinfo, requests as req
 
-VERSION   = "5.1.0"
+VERSION   = "5.4.0"
 PORT      = 5050
 # TopstepX runs on the ProjectX Gateway. One REST base for everything;
 # the Demo/Live toggle only affects how we label the connection (TopstepX
@@ -198,6 +198,98 @@ def ts_place_stop(token, account_id, contract_id, side, stop_price, qty):
     r = req.post(f"{BASE}/api/Order/place", json=payload, headers=_h(token), timeout=15)
     return r.json()
 
+def _order_id(resp):
+    """Pull the order id out of a place response (or None on failure)."""
+    if not isinstance(resp, dict):
+        return None
+    return resp.get("orderId") or resp.get("id")
+
+def ts_cancel_order(token, account_id, order_id):
+    """Cancel a working order by id."""
+    payload = {"accountId": int(account_id), "orderId": int(order_id)}
+    r = req.post(f"{BASE}/api/Order/cancel", json=payload, headers=_h(token), timeout=15)
+    try:
+        return r.json()
+    except Exception:
+        return {"success": False, "http": r.status_code}
+
+def ts_search_open(token, account_id):
+    """Return the list of currently working/open orders for an account."""
+    r = req.post(f"{BASE}/api/Order/searchOpen",
+                 json={"accountId": int(account_id)}, headers=_h(token), timeout=15)
+    d = r.json()
+    return d.get("orders", []) if isinstance(d, dict) else []
+
+def ts_order_status(token, account_id, order_id, since_iso):
+    """Look up one order's status int via Order/search. None if not found.
+    ProjectX OrderStatus: 1 Open/Working, 2 Filled, 3 Cancelled, 4 Expired,
+    5 Rejected, 6 Pending."""
+    payload = {"accountId": int(account_id), "startTimestamp": since_iso}
+    r = req.post(f"{BASE}/api/Order/search", json=payload, headers=_h(token), timeout=15)
+    d = r.json()
+    orders = d.get("orders", []) if isinstance(d, dict) else []
+    for o in orders:
+        if o.get("id") == order_id:
+            return o.get("status")
+    return None
+
+ORDER_FILLED   = 2          # ProjectX OrderStatus == Filled
+OCO_WATCH_SECS = 6 * 3600   # give up watching a bracket after 6 hours
+
+def oco_monitor(sess, token, account_id, buy_id, sell_id):
+    """One-Cancels-the-Other: watch the two stop orders and, the moment one
+    fills, cancel its sibling so a whipsaw can't trigger both sides."""
+    if not buy_id or not sell_id:
+        if not buy_id and not sell_id:
+            return
+        # Only one order actually placed — nothing to pair it with.
+        return
+    since_iso = (datetime.now(ET) - timedelta(minutes=5)).isoformat()
+    deadline = time.time() + OCO_WATCH_SECS
+    log_s(sess, "🛡 OCO active — first stop to fill cancels the other.")
+    while time.time() < deadline:
+        time.sleep(1.0)
+        # Stop watching if the session was reaped / user logged out.
+        try:
+            with LOCK:
+                alive = any(s is sess for s in SESSIONS.values())
+            if not alive:
+                return
+        except Exception:
+            pass
+        try:
+            open_ids = {o.get("id") for o in ts_search_open(token, account_id)}
+        except Exception:
+            continue
+        buy_open, sell_open = buy_id in open_ids, sell_id in open_ids
+        if buy_open and sell_open:
+            continue
+        # At least one order has left the working list — find out which filled.
+        try:
+            if not buy_open and sell_open:
+                if ts_order_status(token, account_id, buy_id, since_iso) == ORDER_FILLED:
+                    ts_cancel_order(token, account_id, sell_id)
+                    log_s(sess, "🎯 Stop Buy filled → cancelled the Stop Sell (OCO)")
+                return
+            if buy_open and not sell_open:
+                if ts_order_status(token, account_id, sell_id, since_iso) == ORDER_FILLED:
+                    ts_cancel_order(token, account_id, buy_id)
+                    log_s(sess, "🎯 Stop Sell filled → cancelled the Stop Buy (OCO)")
+                return
+            # Neither is working anymore — resolve who filled before stopping.
+            sb = ts_order_status(token, account_id, buy_id, since_iso)
+            ss = ts_order_status(token, account_id, sell_id, since_iso)
+            if sb == ORDER_FILLED and ss != ORDER_FILLED:
+                ts_cancel_order(token, account_id, sell_id)
+                log_s(sess, "🎯 Stop Buy filled → cancelled the Stop Sell (OCO)")
+            elif ss == ORDER_FILLED and sb != ORDER_FILLED:
+                ts_cancel_order(token, account_id, buy_id)
+                log_s(sess, "🎯 Stop Sell filled → cancelled the Stop Buy (OCO)")
+            return
+        except Exception as e:
+            log_s(sess, f"⚠ OCO watch error: {e}")
+            return
+
 def ts_quote_live(token, contract_id, timeout=8.0):
     """Open the SignalR market hub and return the first live lastPrice (float)
     for contract_id, or None if no quote arrives within `timeout` seconds."""
@@ -349,6 +441,10 @@ def fire_for(sess, manual=False):
         log_s(sess, f"⏰ Buy  → {r1}")
         r2 = ts_place_stop(token, acct["id"], cid, SIDE_SELL, sell_px, qty)
         log_s(sess, f"⏰ Sell → {r2}")
+        buy_id, sell_id = _order_id(r1), _order_id(r2)
+        threading.Thread(target=oco_monitor,
+                         args=(sess, token, acct["id"], buy_id, sell_id),
+                         daemon=True).start()
         if manual:
             log_s(sess, "✅ Test fire complete — orders placed")
         else:
@@ -554,12 +650,15 @@ APP_HTML = r"""<!DOCTYPE html><html lang="en"><head>
 </div>
 <script>
 let armed=false,lastLog=0;
-async function api(path,data){const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data||{})});if(r.status===401){location.href='/';return{};}return r.json();}
+async function api(path,data){try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data||{})});if(r.status===401){location.href='/';return{};}return await r.json();}catch(e){return{ok:false,error:'Could not reach the app. Make sure it is still running, then reload this page.'};}}
+function onConnected(d){document.getElementById('connChip').className='chip chip-on';document.getElementById('connChip').textContent='Connected';
+  document.getElementById('loginSt').innerHTML=`<span class="ok">${d.accounts.length} account(s) loaded</span>`;
+  document.getElementById('acctSel').innerHTML=d.accounts.map(a=>`<option value="${a.id}">${a.name} (#${a.id})</option>`).join('');}
 async function connect(){const s=document.getElementById('loginSt');s.innerHTML='<span class="wrn">Connecting…</span>';
-  const d=await api('/connect',{user:document.getElementById('user').value,pass:document.getElementById('pass').value});
-  if(d.ok){document.getElementById('connChip').className='chip chip-on';document.getElementById('connChip').textContent='Connected';
-    s.innerHTML=`<span class="ok">${d.accounts.length} account(s) loaded</span>`;
-    document.getElementById('acctSel').innerHTML=d.accounts.map(a=>`<option value="${a.id}">${a.name} (#${a.id})</option>`).join('');}
+  const key=document.getElementById('pass').value.trim();
+  if(!key){s.innerHTML='<span class="err">Enter your API key.</span>';return;}
+  const d=await api('/connect',{user:document.getElementById('user').value,pass:key});
+  if(d.ok){onConnected(d);}
   else{s.innerHTML=`<span class="err">${d.error}</span>`;}}
 async function lookup(){const s=document.getElementById('symSt');s.innerHTML='<span class="wrn">Looking up…</span>';
   const d=await api('/lookup',{sym:document.getElementById('sym').value});
@@ -570,7 +669,7 @@ function updatePreview(){const pb=parseFloat(document.getElementById('ptsBuy').v
   document.getElementById('pvBuy').innerHTML=isNaN(pb)?'&mdash;':('Live + '+pb.toFixed(2));
   document.getElementById('pvSell').innerHTML=isNaN(ps)?'&mdash;':('Live &minus; '+ps.toFixed(2));}
 function orderArgs(){return{buy_pts:document.getElementById('ptsBuy').value,sell_pts:document.getElementById('ptsSell').value,qty:document.getElementById('qty').value,acct:document.getElementById('acctSel').value};}
-async function placeNow(){if(!confirm('Place a Stop Buy and Stop Sell at the live price now?'))return;await api('/place',orderArgs());}
+async function placeNow(){if(!confirm('Place a Stop Buy and Stop Sell at the live price now?'))return;const d=await api('/place',orderArgs());if(d&&d.ok===false&&d.error){alert(d.error);}}
 async function testFire(){if(!confirm('Run a test fire now? This places real stop orders at the live price on the selected account. Use a practice account.'))return;await api('/test_fire',orderArgs());}
 async function toggleArm(){const d=await api('/arm',orderArgs());applyArmUI(d.armed);}
 function applyArmUI(on){armed=on;const btn=document.getElementById('armBtn'),desc=document.getElementById('armDesc'),cdBar=document.getElementById('cdBar');
@@ -812,7 +911,9 @@ class Handler(BaseHTTPRequestHandler):
 
         # ---- per-user app endpoints ----
         if path == "/connect":
-            ok, res = ts_auth(d.get("user", "").strip(), d.get("pass", "").strip())
+            user = d.get("user", "").strip()
+            pw = d.get("pass", "").strip()
+            ok, res = ts_auth(user, pw)
             if not ok:
                 self._json({"ok": False, "error": res}); return
             sess["ts_token"] = res
@@ -838,16 +939,22 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/place":
-            if not ensure_token(sess) or not sess["contract"]:
-                log_s(sess, "⚠ Connect and look up a symbol first"); self._json({"ok": False}); return
+            if not ensure_token(sess):
+                log_s(sess, "⚠ Connect to TopstepX first")
+                self._json({"ok": False, "error": "Connect to TopstepX first"}); return
+            if not sess["contract"]:
+                log_s(sess, "⚠ Look up a symbol first")
+                self._json({"ok": False, "error": "Look up a symbol first (type a symbol and press Look up)."}); return
             sess["selected_account"] = str(d.get("acct", ""))
             acct = selected_account(sess)
             if not acct:
-                log_s(sess, "⚠ No account selected"); self._json({"ok": False}); return
+                log_s(sess, "⚠ No account selected")
+                self._json({"ok": False, "error": "No account selected"}); return
             try:
                 buy_pts = float(d["buy_pts"]); sell_pts = float(d["sell_pts"]); qty = int(d["qty"])
             except Exception:
-                log_s(sess, "⚠ Invalid pts/qty"); self._json({"ok": False}); return
+                log_s(sess, "⚠ Invalid pts/qty")
+                self._json({"ok": False, "error": "Enter valid buy/sell points and quantity"}); return
             cid = sess["contract"]["id"]
             token = sess["ts_token"]
             def do_place():
@@ -863,6 +970,10 @@ class Handler(BaseHTTPRequestHandler):
                     r2 = ts_place_stop(token, acct["id"], cid, SIDE_SELL, sell_px, qty)
                     log_s(sess, f"Sell → {r2}")
                     log_s(sess, "✅ Both orders submitted")
+                    buy_id, sell_id = _order_id(r1), _order_id(r2)
+                    threading.Thread(target=oco_monitor,
+                                     args=(sess, token, acct["id"], buy_id, sell_id),
+                                     daemon=True).start()
                 except Exception as e:
                     log_s(sess, f"❌ Order error: {e}")
             threading.Thread(target=do_place, daemon=True).start()
