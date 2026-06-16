@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
 import zoneinfo, requests as req
 
-VERSION   = "5.4.0"
+VERSION   = "5.4.1"
 PORT      = 5050
 # TopstepX runs on the ProjectX Gateway. One REST base for everything;
 # the Demo/Live toggle only affects how we label the connection (TopstepX
@@ -298,7 +298,16 @@ def ts_quote_live(token, contract_id, timeout=8.0):
     except ImportError:
         raise RuntimeError("websocket-client not installed — run: pip install websocket-client")
     url = f"{RTC_MKT}?access_token={token}"
-    ws = websocket.create_connection(url, timeout=timeout)
+    # websocket-client doesn't use certifi's CA bundle by default, so inside a
+    # packaged (PyInstaller) app on macOS it can't verify the TLS cert and fails
+    # with CERTIFICATE_VERIFY_FAILED. Point it at the same CA bundle requests uses.
+    sslopt = None
+    try:
+        import certifi
+        sslopt = {"ca_certs": certifi.where()}
+    except Exception:
+        sslopt = None
+    ws = websocket.create_connection(url, timeout=timeout, sslopt=sslopt)
     try:
         ws.settimeout(timeout)
         ws.send('{"protocol":"json","version":1}' + RECORD_SEP)   # handshake
