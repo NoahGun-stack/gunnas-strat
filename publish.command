@@ -49,8 +49,7 @@ echo "==> Pushing files to $REPO_URL ..."
 git push -u origin main
 
 # 6. Tag a version so GitHub Actions builds and publishes the apps
-read -p "Version to release [v1.0.0]: " VER
-VER="${VER:-v1.0.0}"
+VER="v1.0.4"
 git tag -f "$VER"
 git push -f origin "$VER"
 

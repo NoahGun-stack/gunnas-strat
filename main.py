@@ -20,7 +20,21 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
 import zoneinfo, requests as req
 
-VERSION   = "5.4.1"
+# Force every TLS connection (requests, stdlib ssl, websocket) to use the CA
+# bundle that ships with the app. Inside a packaged (PyInstaller) build —
+# especially on Windows — Python can't find a system trust store, so without
+# this the HTTPS login to the license server fails and the app reports
+# "Can't reach the license server." Setting these env vars points requests AND
+# the stdlib ssl module (used by websocket-client) at the bundled certifi file.
+try:
+    import certifi as _certifi
+    _CA = _certifi.where()
+    os.environ["SSL_CERT_FILE"] = _CA
+    os.environ["REQUESTS_CA_BUNDLE"] = _CA
+except Exception:
+    pass
+
+VERSION   = "5.4.2"
 PORT      = 5050
 # TopstepX runs on the ProjectX Gateway. One REST base for everything;
 # the Demo/Live toggle only affects how we label the connection (TopstepX
