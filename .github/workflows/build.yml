@@ -24,6 +24,7 @@ jobs:
         run: |
           pyinstaller --onefile --windowed --name "Gunnas Strat" \
             --hidden-import websocket \
+            --hidden-import truststore \
             --collect-submodules tzdata \
             --collect-data certifi \
             main.py
@@ -44,7 +45,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Build .exe
-        run: pyinstaller --onefile --windowed --name "Gunnas Strat" --hidden-import websocket --collect-submodules tzdata --collect-data certifi main.py
+        run: pyinstaller --onefile --windowed --name "Gunnas Strat" --hidden-import websocket --hidden-import truststore --collect-submodules tzdata --collect-data certifi main.py
       - name: Rename
         run: ren "dist\Gunnas Strat.exe" "Gunnas-Strat-windows.exe"
       - uses: actions/upload-artifact@v4
@@ -65,6 +66,7 @@ jobs:
         run: |
           pyinstaller --onefile --name "gunnas-strat" \
             --hidden-import websocket \
+            --hidden-import truststore \
             --collect-submodules tzdata \
             --collect-data certifi \
             main.py

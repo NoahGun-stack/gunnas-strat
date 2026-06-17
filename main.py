@@ -34,7 +34,17 @@ try:
 except Exception:
     pass
 
-VERSION   = "5.4.2"
+# More robust fallback: make Python's TLS verify against the operating system's
+# own certificate store — the same store the browser and curl use successfully.
+# Inside a packaged app on Windows the bundled certifi file sometimes isn't
+# picked up, so the HTTPS login fails; deferring to the OS store fixes that.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except Exception:
+    pass
+
+VERSION   = "5.4.3"
 PORT      = 5050
 # TopstepX runs on the ProjectX Gateway. One REST base for everything;
 # the Demo/Live toggle only affects how we label the connection (TopstepX
@@ -78,8 +88,8 @@ def validate_license(username, password):
         r = req.post(f"{LICENSE_SERVER}/api/validate",
                      json={"username": username, "password": password},
                      timeout=10)
-    except Exception:
-        return False, "Can't reach the license server. Check your internet connection and try again."
+    except Exception as e:
+        return False, f"Can't reach the license server ({type(e).__name__}: {e})."
     try:
         data = r.json()
     except Exception:
