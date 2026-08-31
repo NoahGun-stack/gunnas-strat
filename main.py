@@ -62,9 +62,14 @@ SESS_IDLE = 24 * 3600                  # drop idle sessions after this many secs
 # Central license server: every login is validated here. The owner manages all
 # accounts (create / deactivate / expire / delete) from this server's panel, so
 # deleting or deactivating a user there instantly locks them out of this app.
+# ---------------------------------------------------------------------------
+#  >>> SET THIS after deploying LicenseServer-cf. It is the URL wrangler prints,
+#  >>> e.g. "https://gunnas-strat-license.YOURNAME.workers.dev" (or your own
+#  >>> domain). Everything else is already wired up.
+# ---------------------------------------------------------------------------
 LICENSE_SERVER = os.environ.get(
     "GUNNA_LICENSE_SERVER",
-    "https://gunnas-strat-production.up.railway.app",
+    "https://gunnas-strat-license.gunnas.workers.dev",
 ).rstrip("/")
 LICENSE_RECHECK = 180   # seconds between mid-session license re-checks
 
@@ -82,11 +87,27 @@ def _verify_pw(pw, salt, h):
 
 def validate_license(username, password):
     """Validate a login against the central license server.
+
+    The password never leaves this machine. We ask the server for the account's
+    salt, derive the PBKDF2 hash here, and send only that derived value; the
+    server stores a SHA-256 of it. So the server never sees a password, and a
+    breach of its database still would not expose one.
+
     Returns (ok: bool, info_or_error). On success info is the server's JSON
     ({"username","is_admin","expires"}). On failure it's a user-facing string."""
     try:
+        s = req.post(f"{LICENSE_SERVER}/api/salt",
+                     json={"username": username}, timeout=10)
+        salt_data = s.json()
+        salt = str(salt_data.get("salt", ""))
+        iters = int(salt_data.get("iters", 200_000))
+        if len(salt) != 32:
+            return False, "License server returned an unexpected response. Try again shortly."
+        # Same derivation the server's admin panel performs in the browser.
+        ph = hashlib.pbkdf2_hmac("sha256", password.encode(),
+                                 bytes.fromhex(salt), iters).hex()
         r = req.post(f"{LICENSE_SERVER}/api/validate",
-                     json={"username": username, "password": password},
+                     json={"username": username, "ph": ph},
                      timeout=10)
     except Exception as e:
         return False, f"Can't reach the license server ({type(e).__name__}: {e})."
@@ -101,6 +122,10 @@ def validate_license(username, password):
         return False, "Your account has been deactivated. Contact the owner."
     if reason == "expired":
         return False, "Your subscription has expired. Contact the owner to renew."
+    if reason == "throttled":
+        return False, "Too many failed sign-in attempts. Try again in 15 minutes."
+    if reason == "outdated_client":
+        return False, "This version of the app is out of date. Download the latest build."
     return False, data.get("error", "Invalid username or password")
 
 def license_active(username):
